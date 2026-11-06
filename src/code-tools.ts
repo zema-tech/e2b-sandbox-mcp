@@ -170,10 +170,12 @@ export class CodeSandboxManager {
 
     try {
       const content = await sandbox.files.read(path);
+      // files.read typically returns string; coerce safely for TS
+      const text = typeof content === 'string' ? content : String(content as unknown);
       return {
         success: true,
         path,
-        content: typeof content === 'string' ? content : content.toString(),
+        content: text,
       };
     } catch (error) {
       return {
