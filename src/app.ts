@@ -8,6 +8,7 @@ import { SandboxManager } from "./sandbox-manager.js";
 import { ComputerUseTools } from "./computer-use-tools.js";
 import { CodeSandboxManager } from "./code-tools.js";
 import { llmChat, listLlmProviders } from "./llm-tools.js";
+import * as kaggle from "./kaggle-tools.js";
 
 const MCP_API_TOKEN = process.env.MCP_API_TOKEN;
 const E2B_API_KEY = process.env.E2B_API_KEY || null;
@@ -19,7 +20,7 @@ const codeSandboxManager = new CodeSandboxManager(E2B_API_KEY);
 
 export function createServer(): McpServer {
   const server = new McpServer(
-    { name: "e2b-sandbox-mcp", version: "1.3.0" },
+    { name: "e2b-sandbox-mcp", version: "1.4.0" },
     { capabilities: { logging: {} } },
   );
 
@@ -306,9 +307,9 @@ export function createServer(): McpServer {
     "llm_chat",
     {
       description:
-        "Call an LLM using API keys on this server. Providers: groq (default if GROQ_API_KEY set), openai, or custom OpenAI-compatible base_url. Set GROQ_API_KEY / OPENAI_API_KEY on Render.",
+        "Call an LLM using API keys on this server. Providers: groq, xai (Grok), openai, openrouter, together, deepseek, fireworks, mistral, custom. Set matching env keys on Render.",
       inputSchema: {
-        provider: z.enum(["groq", "openai", "custom"]).optional(),
+        provider: z.enum(["groq", "xai", "openai", "openrouter", "together", "deepseek", "fireworks", "mistral", "custom"]).optional(),
         model: z.string().optional().describe("e.g. llama-3.3-70b-versatile, llama-3.1-8b-instant"),
         messages: z.array(
           z.object({
@@ -343,6 +344,119 @@ export function createServer(): McpServer {
         content: [{ type: "text", text: JSON.stringify(listLlmProviders(), null, 2) }],
       };
     },
+  );
+
+
+  // ========== KAGGLE (native API) ==========
+  server.registerTool(
+    "kaggle_status",
+    { description: "Check if Kaggle credentials are configured on this server", inputSchema: {} },
+    async () => ({ content: [{ type: "text", text: JSON.stringify(kaggle.kaggleConfigured(), null, 2) }] }),
+  );
+
+  server.registerTool(
+    "kaggle_list_datasets",
+    {
+      description: "List/search Kaggle datasets",
+      inputSchema: {
+        search: z.string().optional(),
+        page: z.number().optional(),
+        user: z.string().optional(),
+        sortBy: z.string().optional(),
+        maxSize: z.number().optional(),
+      },
+    },
+    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.listDatasets(args), null, 2) }] }),
+  );
+
+  server.registerTool(
+    "kaggle_get_dataset",
+    {
+      description: "Get metadata for a Kaggle dataset (owner/dataset)",
+      inputSchema: { owner: z.string(), dataset: z.string() },
+    },
+    async ({ owner, dataset }) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.getDataset(owner, dataset), null, 2) }] }),
+  );
+
+  server.registerTool(
+    "kaggle_list_dataset_files",
+    {
+      description: "List files inside a Kaggle dataset",
+      inputSchema: { owner: z.string(), dataset: z.string() },
+    },
+    async ({ owner, dataset }) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.listDatasetFiles(owner, dataset), null, 2) }] }),
+  );
+
+  server.registerTool(
+    "kaggle_dataset_download_info",
+    {
+      description: "Get download URL/instructions for a dataset zip (pair with E2B run_code + curl)",
+      inputSchema: { owner: z.string(), dataset: z.string() },
+    },
+    async ({ owner, dataset }) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.datasetDownloadInfo(owner, dataset), null, 2) }] }),
+  );
+
+  server.registerTool(
+    "kaggle_list_kernels",
+    {
+      description: "List/search Kaggle kernels (notebooks/scripts)",
+      inputSchema: {
+        search: z.string().optional(),
+        page: z.number().optional(),
+        user: z.string().optional(),
+        dataset: z.string().optional(),
+        competition: z.string().optional(),
+        language: z.string().optional(),
+        kernelType: z.string().optional(),
+        sortBy: z.string().optional(),
+      },
+    },
+    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.listKernels(args), null, 2) }] }),
+  );
+
+  server.registerTool(
+    "kaggle_pull_kernel",
+    {
+      description: "Pull a Kaggle kernel source (notebook/script + metadata)",
+      inputSchema: {
+        user: z.string(),
+        kernel: z.string(),
+        metadata: z.boolean().optional(),
+      },
+    },
+    async ({ user, kernel, metadata }) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.pullKernel(user, kernel, metadata ?? true), null, 2) }] }),
+  );
+
+  server.registerTool(
+    "kaggle_kernel_status",
+    {
+      description: "Get execution status of a Kaggle kernel",
+      inputSchema: { user: z.string(), kernel: z.string() },
+    },
+    async ({ user, kernel }) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.kernelStatus(user, kernel), null, 2) }] }),
+  );
+
+  server.registerTool(
+    "kaggle_list_competitions",
+    {
+      description: "List/search Kaggle competitions",
+      inputSchema: {
+        search: z.string().optional(),
+        page: z.number().optional(),
+        category: z.string().optional(),
+        sortBy: z.string().optional(),
+      },
+    },
+    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.listCompetitions(args), null, 2) }] }),
+  );
+
+  server.registerTool(
+    "kaggle_push_kernel",
+    {
+      description: "Push/update a Kaggle kernel (run on Kaggle). Pass full kernel push payload.",
+      inputSchema: { body: z.record(z.unknown()) },
+    },
+    async ({ body }) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.pushKernel(body), null, 2) }] }),
   );
 
   return server;
@@ -383,8 +497,8 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     e2bConfigured: !!E2B_API_KEY,
-    version: "1.3.0",
-    features: ["desktop", "code-interpreter", "llm-groq", "llm-openai"],
+    version: "1.4.0",
+    features: ["desktop", "code-interpreter", "llm-multi", "kaggle"],
     timestamp: new Date().toISOString(),
   });
 });
