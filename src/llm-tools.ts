@@ -1,9 +1,20 @@
-/** LLM helpers for Groq / OpenAI-compatible providers (API keys from env on Render). */
+/** Multi-provider LLM helpers (OpenAI-compatible + xAI Grok). Keys from env on Render. */
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
+export type LlmProvider =
+  | "groq"
+  | "xai"
+  | "openai"
+  | "openrouter"
+  | "together"
+  | "deepseek"
+  | "fireworks"
+  | "mistral"
+  | "custom";
+
 export type LlmChatArgs = {
-  provider?: "groq" | "openai" | "custom";
+  provider?: LlmProvider;
   model?: string;
   messages: ChatMessage[];
   temperature?: number;
@@ -11,6 +22,72 @@ export type LlmChatArgs = {
   base_url?: string;
   api_key_env?: string;
 };
+
+type ProviderConfig = {
+  envKey: string;
+  endpoint: string;
+  defaultModel: string;
+};
+
+const PROVIDERS: Record<Exclude<LlmProvider, "custom">, ProviderConfig> = {
+  groq: {
+    envKey: "GROQ_API_KEY",
+    endpoint: "https://api.groq.com/openai/v1/chat/completions",
+    defaultModel: "llama-3.3-70b-versatile",
+  },
+  xai: {
+    envKey: "XAI_API_KEY",
+    endpoint: "https://api.x.ai/v1/chat/completions",
+    defaultModel: "grok-2-latest",
+  },
+  openai: {
+    envKey: "OPENAI_API_KEY",
+    endpoint: "https://api.openai.com/v1/chat/completions",
+    defaultModel: "gpt-4o-mini",
+  },
+  openrouter: {
+    envKey: "OPENROUTER_API_KEY",
+    endpoint: "https://openrouter.ai/api/v1/chat/completions",
+    defaultModel: "openai/gpt-4o-mini",
+  },
+  together: {
+    envKey: "TOGETHER_API_KEY",
+    endpoint: "https://api.together.xyz/v1/chat/completions",
+    defaultModel: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+  },
+  deepseek: {
+    envKey: "DEEPSEEK_API_KEY",
+    endpoint: "https://api.deepseek.com/chat/completions",
+    defaultModel: "deepseek-chat",
+  },
+  fireworks: {
+    envKey: "FIREWORKS_API_KEY",
+    endpoint: "https://api.fireworks.ai/inference/v1/chat/completions",
+    defaultModel: "accounts/fireworks/models/llama-v3p1-70b-instruct",
+  },
+  mistral: {
+    envKey: "MISTRAL_API_KEY",
+    endpoint: "https://api.mistral.ai/v1/chat/completions",
+    defaultModel: "mistral-small-latest",
+  },
+};
+
+function pickDefaultProvider(): LlmProvider {
+  const order: Exclude<LlmProvider, "custom">[] = [
+    "groq",
+    "xai",
+    "openrouter",
+    "openai",
+    "together",
+    "deepseek",
+    "fireworks",
+    "mistral",
+  ];
+  for (const p of order) {
+    if (process.env[PROVIDERS[p].envKey]) return p;
+  }
+  return "groq";
+}
 
 export async function llmChat(args: LlmChatArgs) {
   const {
@@ -23,39 +100,35 @@ export async function llmChat(args: LlmChatArgs) {
     api_key_env,
   } = args;
 
-  const groqKey = process.env.GROQ_API_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
-
-  let resolvedProvider = provider;
-  if (!resolvedProvider) {
-    resolvedProvider = groqKey ? "groq" : openaiKey ? "openai" : "groq";
-  }
+  const resolved = provider || pickDefaultProvider();
 
   let apiKey: string | undefined;
   let endpoint: string;
   let defaultModel: string;
 
-  if (resolvedProvider === "groq") {
-    apiKey = groqKey;
-    endpoint = "https://api.groq.com/openai/v1/chat/completions";
-    defaultModel = "llama-3.3-70b-versatile";
-  } else if (resolvedProvider === "openai") {
-    apiKey = openaiKey;
-    endpoint = "https://api.openai.com/v1/chat/completions";
-    defaultModel = "gpt-4o-mini";
-  } else {
+  if (resolved === "custom") {
     apiKey = process.env[api_key_env || "OPENAI_API_KEY"];
     endpoint = `${(base_url || "").replace(/\/$/, "")}/chat/completions`;
     defaultModel = model || "gpt-4o-mini";
+    if (!base_url) {
+      return { error: "provider=custom requires base_url" };
+    }
+  } else {
+    const cfg = PROVIDERS[resolved];
+    apiKey = process.env[cfg.envKey];
+    endpoint = cfg.endpoint;
+    defaultModel = cfg.defaultModel;
   }
 
   if (!apiKey) {
+    const envName =
+      resolved === "custom"
+        ? api_key_env || "OPENAI_API_KEY"
+        : PROVIDERS[resolved as Exclude<LlmProvider, "custom">].envKey;
     return {
-      error: `Missing API key for provider '${resolvedProvider}'. Set GROQ_API_KEY or OPENAI_API_KEY on Render.`,
+      error: `Missing API key for provider '${resolved}'. Set ${envName} on Render.`,
+      configured: listLlmProviders(),
     };
-  }
-  if (resolvedProvider === "custom" && !base_url) {
-    return { error: "provider=custom requires base_url" };
   }
 
   const body = {
@@ -65,12 +138,18 @@ export async function llmChat(args: LlmChatArgs) {
     max_tokens: max_tokens ?? 2048,
   };
 
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+  };
+  if (resolved === "openrouter") {
+    headers["HTTP-Referer"] = process.env.OPENROUTER_REFERER || "https://e2b-sandbox-mcp.onrender.com";
+    headers["X-Title"] = process.env.OPENROUTER_TITLE || "e2b-sandbox-mcp";
+  }
+
   const res = await fetch(endpoint, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify(body),
   });
 
@@ -83,7 +162,7 @@ export async function llmChat(args: LlmChatArgs) {
     data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? null;
 
   return {
-    provider: resolvedProvider,
+    provider: resolved,
     model: body.model,
     content,
     usage: data.usage ?? null,
@@ -92,13 +171,25 @@ export async function llmChat(args: LlmChatArgs) {
 }
 
 export function listLlmProviders() {
+  const configured: Record<string, boolean> = {};
+  for (const [name, cfg] of Object.entries(PROVIDERS)) {
+    configured[name] = !!process.env[cfg.envKey];
+  }
   return {
-    groq: !!process.env.GROQ_API_KEY,
-    openai: !!process.env.OPENAI_API_KEY,
-    default: process.env.GROQ_API_KEY
-      ? "groq"
-      : process.env.OPENAI_API_KEY
-        ? "openai"
-        : null,
+    providers: configured,
+    default: pickDefaultProvider(),
+    env_vars: Object.fromEntries(
+      Object.entries(PROVIDERS).map(([name, cfg]) => [name, cfg.envKey]),
+    ),
+    models_hint: {
+      groq: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+      xai: ["grok-2-latest", "grok-3", "grok-3-mini"],
+      openai: ["gpt-4o", "gpt-4o-mini", "o4-mini"],
+      openrouter: ["openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "google/gemini-2.0-flash"],
+      together: ["meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"],
+      deepseek: ["deepseek-chat", "deepseek-reasoner"],
+      fireworks: ["accounts/fireworks/models/llama-v3p1-70b-instruct"],
+      mistral: ["mistral-small-latest", "mistral-large-latest"],
+    },
   };
 }
