@@ -57,6 +57,7 @@ async function kaggleFetch(
     headers: {
       Authorization: auth,
       Accept: "application/json",
+      ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
@@ -182,9 +183,9 @@ export async function pullKernel(user: string, kernel: string, metadata = true) 
 }
 
 export async function kernelStatus(user: string, kernel: string) {
-  const r = await kaggleFetch(
-    `/kernels/status/${encodeURIComponent(user)}/${encodeURIComponent(kernel)}`,
-  );
+  const r = await kaggleFetch("/kernels/status", {
+    query: { userName: user, kernelSlug: kernel },
+  });
   return r.data;
 }
 
