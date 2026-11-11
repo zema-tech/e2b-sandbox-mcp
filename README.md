@@ -651,6 +651,10 @@ Available Kaggle tools:
 | `kaggle_list_competition_files` | List competition data files |
 | `kaggle_list_competition_submissions` | Inspect your submissions |
 | `kaggle_view_competition_leaderboard` | View a competition leaderboard |
+| `kaggle_dataset_status` | Check dataset creation/version processing status |
+| `kaggle_list_kernel_files` | List notebook output files with pagination and optional version |
+| `kaggle_list_models`, `kaggle_get_model` | Search the model catalogue and inspect model metadata |
+| `kaggle_list_model_instance_files` | List files in a model framework/variation |
 
 Competition data access and submissions remain subject to Kaggle's rules,
 account permissions, and competition-specific requirements. Kaggle applies
