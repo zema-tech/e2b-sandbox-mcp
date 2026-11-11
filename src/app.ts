@@ -459,6 +459,53 @@ export function createServer(): McpServer {
     async ({ body }) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.pushKernel(body), null, 2) }] }),
   );
 
+  server.registerTool(
+    "kaggle_list_competition_files",
+    {
+      description: "List downloadable data files for a Kaggle competition. The account may need to accept the competition rules first.",
+      inputSchema: { competition: z.string().min(1) },
+    },
+    async ({ competition }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.listCompetitionFiles(competition), null, 2) }],
+    }),
+  );
+
+  server.registerTool(
+    "kaggle_list_competition_submissions",
+    {
+      description: "List the authenticated user's submissions for a Kaggle competition.",
+      inputSchema: {
+        competition: z.string().min(1),
+        page: z.number().int().min(1).optional(),
+      },
+    },
+    async ({ competition, page }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.listCompetitionSubmissions(competition, page ?? 1), null, 2) }],
+    }),
+  );
+
+  server.registerTool(
+    "kaggle_view_competition_leaderboard",
+    {
+      description: "View the leaderboard for a Kaggle competition.",
+      inputSchema: { competition: z.string().min(1) },
+    },
+    async ({ competition }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.viewCompetitionLeaderboard(competition), null, 2) }],
+    }),
+  );
+
+  server.registerTool(
+    "kaggle_get_kernel_output",
+    {
+      description: "Get the latest output bundle for a Kaggle notebook/kernel (user + kernel slug).",
+      inputSchema: { user: z.string().min(1), kernel: z.string().min(1) },
+    },
+    async ({ user, kernel }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.getKernelOutput(user, kernel), null, 2) }],
+    }),
+  );
+
   return server;
 }
 
@@ -504,18 +551,9 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 app.post("/mcp", async (req: Request, res: Response) => {
-  if (!E2B_API_KEY) {
-    res.status(500).json({
-      jsonrpc: "2.0",
-      error: {
-        code: -32603,
-        message: "E2B_API_KEY is not configured on this server",
-      },
-      id: null,
-    });
-    return;
-  }
-
+  // Kaggle and LLM tools do not require E2B. E2B-backed tools report their own
+  // configuration errors when invoked, so the MCP endpoint remains usable
+  // for deployments that only enable Kaggle.
   const server = createServer();
   try {
     const transport = new StreamableHTTPServerTransport({
