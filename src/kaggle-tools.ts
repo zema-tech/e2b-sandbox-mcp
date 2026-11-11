@@ -209,3 +209,40 @@ export async function pushKernel(body: Record<string, unknown>) {
   const r = await kaggleFetch("/kernels/push", { method: "POST", body });
   return r.data;
 }
+
+
+/** List files attached to a competition. Requires accepted competition rules. */
+export async function listCompetitionFiles(competition: string) {
+  const r = await kaggleFetch(
+    `/competitions/data/list/${encodeURIComponent(competition)}`,
+  );
+  return r.data;
+}
+
+/** List the authenticated user's submissions for a competition. */
+export async function listCompetitionSubmissions(
+  competition: string,
+  page = 1,
+) {
+  const r = await kaggleFetch(
+    `/competitions/submissions/list/${encodeURIComponent(competition)}`,
+    { query: { page } },
+  );
+  return r.data;
+}
+
+/** Retrieve a competition leaderboard in the API's structured response. */
+export async function viewCompetitionLeaderboard(competition: string) {
+  const r = await kaggleFetch(
+    `/competitions/${encodeURIComponent(competition)}/leaderboard/view`,
+  );
+  return r.data;
+}
+
+/** Retrieve the latest notebook output bundle metadata/response. */
+export async function getKernelOutput(user: string, kernel: string) {
+  const r = await kaggleFetch("/kernels/output", {
+    query: { userName: user, kernelSlug: kernel },
+  });
+  return r.data;
+}
