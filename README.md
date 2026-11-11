@@ -622,3 +622,44 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 Made with ❤️ for the AI automation community
 
 </div>
+
+
+## 🧪 Kaggle Tools
+
+The HTTP MCP server also exposes Kaggle's API. Configure credentials on the
+server (never put them in notebook code or commit them to Git):
+
+```env
+# Recommended: Kaggle API token
+KAGGLE_API_TOKEN=KGAT_your_token
+
+# Legacy alternative:
+# KAGGLE_USERNAME=your_kaggle_username
+# KAGGLE_KEY=your_legacy_api_key
+```
+
+Available Kaggle tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `kaggle_status` | Check credential configuration without revealing secrets |
+| `kaggle_list_datasets`, `kaggle_get_dataset`, `kaggle_list_dataset_files` | Discover datasets and inspect their metadata/files |
+| `kaggle_dataset_download_info` | Get the authenticated download endpoint for a dataset |
+| `kaggle_list_kernels`, `kaggle_pull_kernel`, `kaggle_kernel_status`, `kaggle_push_kernel` | Discover, pull, inspect, and publish notebooks |
+| `kaggle_get_kernel_output` | Retrieve the latest notebook output response |
+| `kaggle_list_competitions` | Search competitions |
+| `kaggle_list_competition_files` | List competition data files |
+| `kaggle_list_competition_submissions` | Inspect your submissions |
+| `kaggle_view_competition_leaderboard` | View a competition leaderboard |
+
+Competition data access and submissions remain subject to Kaggle's rules,
+account permissions, and competition-specific requirements. Kaggle applies
+dynamic rate limits; avoid tight polling loops and retry HTTP 429 responses
+after a pause.
+
+The MCP endpoint can serve Kaggle-only deployments without an E2B key.
+E2B desktop/code-interpreter tools still require `E2B_API_KEY`.
+
+For current authentication and API behavior, see the
+[Kaggle API documentation](https://www.kaggle.com/docs/api) and the
+[official Kaggle CLI documentation](https://github.com/Kaggle/kaggle-cli).
