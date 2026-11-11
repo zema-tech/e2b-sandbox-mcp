@@ -1,44 +1,33 @@
 /**
- * Native Kaggle API tools.
- * Preferred (2025+): KAGGLE_API_TOKEN=KGAT_...  → Authorization: Bearer
- * Legacy: KAGGLE_USERNAME + KAGGLE_KEY → Basic auth (kaggle.json)
+ * Native Kaggle API tools (not Composio).
+ * Set on Render: KAGGLE_USERNAME + KAGGLE_KEY
+ * (from https://www.kaggle.com/settings -> API -> Create New Token)
  */
 
 const KAGGLE_API = "https://www.kaggle.com/api/v1";
 
 function authHeader(): string | null {
   const token = process.env.KAGGLE_API_TOKEN || process.env.KAGGLE_KEY;
-  // New token format
-  if (token && token.startsWith("KGAT_")) {
-    return `Bearer ${token}`;
-  }
-  // Legacy username + key
+  if (token && token.startsWith("KGAT_")) return `Bearer ${token}`;
   const user = process.env.KAGGLE_USERNAME;
   const key = process.env.KAGGLE_KEY;
   if (user && key && !key.startsWith("KGAT_")) {
     return "Basic " + Buffer.from(`${user}:${key}`).toString("base64");
   }
-  // Token without KGAT_ prefix when no user — treat as bearer
-  if (token && !user) {
-    return `Bearer ${token}`;
-  }
+  if (token && !user) return `Bearer ${token}`;
   return null;
 }
 
 function missingCreds() {
   return {
     error:
-      "Kaggle credentials missing. Prefer KAGGLE_API_TOKEN=KGAT_... on Render (Settings → API → Generate New Token). Legacy: KAGGLE_USERNAME + KAGGLE_KEY from kaggle.json.",
+      "Kaggle credentials missing. Set KAGGLE_USERNAME and KAGGLE_KEY on Render (Kaggle Settings \u2192 API).",
   };
 }
 
 async function kaggleFetch(
   path: string,
-  opts: {
-    method?: string;
-    query?: Record<string, string | number | boolean | undefined>;
-    body?: unknown;
-  } = {},
+  opts: { method?: string; query?: Record<string, string | number | undefined>; body?: unknown } = {},
 ) {
   const auth = authHeader();
   if (!auth) return { ok: false as const, data: missingCreds() };
@@ -46,9 +35,7 @@ async function kaggleFetch(
   const url = new URL(`${KAGGLE_API}${path}`);
   if (opts.query) {
     for (const [k, v] of Object.entries(opts.query)) {
-      if (v !== undefined && v !== null && v !== "") {
-        url.searchParams.set(k, String(v));
-      }
+      if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
     }
   }
 
@@ -56,8 +43,8 @@ async function kaggleFetch(
     method: opts.method || "GET",
     headers: {
       Authorization: auth,
+      "Content-Type": "application/json",
       Accept: "application/json",
-      ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
@@ -77,6 +64,46 @@ async function kaggleFetch(
     };
   }
   return { ok: true as const, data };
+}
+
+/**
+ * Like kaggleFetch, but for binary responses (file downloads) instead of JSON.
+ * Used so a file's bytes can be fetched server-side (where KAGGLE_USERNAME/KAGGLE_KEY
+ * actually live) and written straight into an E2B sandbox, without ever handing the
+ * Kaggle credentials themselves to the sandbox or to the model.
+ */
+export async function kaggleFetchBinary(
+  path: string,
+  query?: Record<string, string | number | undefined>,
+): Promise<
+  | { ok: true; buffer: Buffer; contentType: string | null }
+  | { ok: false; error: unknown }
+> {
+  const auth = authHeader();
+  if (!auth) return { ok: false, error: missingCreds() };
+
+  const url = new URL(`${KAGGLE_API}${path}`);
+  if (query) {
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
+    }
+  }
+
+  const res = await fetch(url.toString(), { headers: { Authorization: auth } });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return {
+      ok: false,
+      error: { error: "Kaggle API error", status: res.status, data: text },
+    };
+  }
+
+  const arrayBuffer = await res.arrayBuffer();
+  return {
+    ok: true,
+    buffer: Buffer.from(arrayBuffer),
+    contentType: res.headers.get("content-type"),
+  };
 }
 
 export function kaggleConfigured() {
@@ -116,9 +143,7 @@ export async function listDatasets(args: {
 }
 
 export async function getDataset(owner: string, dataset: string) {
-  const r = await kaggleFetch(
-    `/datasets/view/${encodeURIComponent(owner)}/${encodeURIComponent(dataset)}`,
-  );
+  const r = await kaggleFetch(`/datasets/view/${encodeURIComponent(owner)}/${encodeURIComponent(dataset)}`);
   return r.data;
 }
 
@@ -129,15 +154,50 @@ export async function listDatasetFiles(owner: string, dataset: string) {
   return r.data;
 }
 
+/**
+ * Returns download info for the full dataset zip. This does NOT download anything
+ * itself (a dataset zip can be large; streaming it through the MCP server into a tool
+ * response would risk exhausting memory), it only returns the authenticated URL.
+ *
+ * Important: KAGGLE_USERNAME/KAGGLE_KEY are secrets configured on THIS server, not
+ * inside the E2B sandbox. A curl command using "$KAGGLE_USERNAME:$KAGGLE_KEY" run via
+ * run_code inside the sandbox will NOT work unless you explicitly pass those values
+ * into the sandbox yourself (e.g. as env vars at sandbox creation) — doing so exposes
+ * your Kaggle API key inside that sandbox. For a single file, prefer
+ * kaggle_download_dataset_file_to_sandbox, which fetches the bytes here on the server
+ * and writes them into the sandbox directly, so the credentials never leave the server.
+ */
 export async function datasetDownloadInfo(owner: string, dataset: string) {
-  if (!authHeader()) return missingCreds();
+  const auth = authHeader();
+  if (!auth) return missingCreds();
   const path = `/datasets/download/${encodeURIComponent(owner)}/${encodeURIComponent(dataset)}`;
   return {
     downloadPath: `${KAGGLE_API}${path}`,
     owner,
     dataset,
-    note: "Download with Authorization: Bearer $KAGGLE_API_TOKEN (or legacy -u user:key).",
+    note:
+      "KAGGLE_USERNAME/KAGGLE_KEY are set on this MCP server, not inside the E2B sandbox — a curl using those env vars will fail unless you pass them into the sandbox explicitly yourself, which exposes your Kaggle key there. For a single file, use kaggle_download_dataset_file_to_sandbox instead (credentials never leave this server). This endpoint returns the whole dataset as a zip, which this server does not stream automatically because of its size.",
   };
+}
+
+/** Download info for a single file in a dataset. Same credential caveat as datasetDownloadInfo. */
+export function datasetFileDownloadInfo(owner: string, dataset: string, fileName: string) {
+  const path = `/datasets/download/${encodeURIComponent(owner)}/${encodeURIComponent(dataset)}/${encodeURIComponent(fileName)}`;
+  return {
+    downloadPath: `${KAGGLE_API}${path}`,
+    owner,
+    dataset,
+    fileName,
+    recommended:
+      "Use kaggle_download_dataset_file_to_sandbox to fetch this file directly into a code sandbox without ever exposing your Kaggle credentials to it.",
+  };
+}
+
+/** Fetches a single dataset file's bytes using the server's own Kaggle credentials. */
+export async function downloadDatasetFile(owner: string, dataset: string, fileName: string) {
+  return kaggleFetchBinary(
+    `/datasets/download/${encodeURIComponent(owner)}/${encodeURIComponent(dataset)}/${encodeURIComponent(fileName)}`,
+  );
 }
 
 export async function listKernels(args: {
@@ -166,26 +226,17 @@ export async function listKernels(args: {
 }
 
 export async function pullKernel(user: string, kernel: string, metadata = true) {
-  const r = await kaggleFetch("/kernels/pull", {
-    query: {
-      userName: user,
-      kernelSlug: kernel,
-      metadata: metadata ? true : false,
-    },
-  });
-  if (!r.ok) {
-    const r2 = await kaggleFetch(
-      `/kernels/pull/${encodeURIComponent(user)}/${encodeURIComponent(kernel)}`,
-    );
-    return r2.data;
-  }
+  const r = await kaggleFetch(
+    `/kernels/pull/${encodeURIComponent(user)}/${encodeURIComponent(kernel)}`,
+    { query: { metadata: metadata ? "true" : "false" } },
+  );
   return r.data;
 }
 
 export async function kernelStatus(user: string, kernel: string) {
-  const r = await kaggleFetch("/kernels/status", {
-    query: { userName: user, kernelSlug: kernel },
-  });
+  const r = await kaggleFetch(
+    `/kernels/status/${encodeURIComponent(user)}/${encodeURIComponent(kernel)}`,
+  );
   return r.data;
 }
 
@@ -206,158 +257,46 @@ export async function listCompetitions(args: {
   return r.data;
 }
 
+/**
+ * Push / update a kernel. `body` is validated against the Kaggle kernel-push schema by
+ * the caller (see kernelPushSchema in app.ts) before reaching this function.
+ */
 export async function pushKernel(body: Record<string, unknown>) {
   const r = await kaggleFetch("/kernels/push", { method: "POST", body });
   return r.data;
 }
 
-
-/** List files attached to a competition. Requires accepted competition rules. */
-export async function listCompetitionFiles(competition: string) {
-  const r = await kaggleFetch(
-    `/competitions/data/list/${encodeURIComponent(competition)}`,
-  );
-  return r.data;
-}
-
-/** List the authenticated user's submissions for a competition. */
-export async function listCompetitionSubmissions(
-  competition: string,
-  page = 1,
-) {
-  const r = await kaggleFetch(
-    `/competitions/submissions/list/${encodeURIComponent(competition)}`,
-    { query: { page } },
-  );
-  return r.data;
-}
-
-/** Retrieve a competition leaderboard in the API's structured response. */
-export async function viewCompetitionLeaderboard(competition: string) {
-  const r = await kaggleFetch(
-    `/competitions/${encodeURIComponent(competition)}/leaderboard/view`,
-  );
-  return r.data;
-}
-
-/**
- * Resolve the latest notebook output download. Kaggle may respond with a
- * redirect to a temporary signed URL, so do not parse the ZIP as text.
- */
-export async function getKernelOutput(user: string, kernel: string) {
-  const auth = authHeader();
-  if (!auth) return missingCreds();
-
-  const url = new URL(`${KAGGLE_API}/kernels/output`);
-  url.searchParams.set("userName", user);
-  url.searchParams.set("kernelSlug", kernel);
-
-  const response = await fetch(url, {
-    method: "GET",
-    redirect: "manual",
-    headers: { Authorization: auth, Accept: "application/json, */*" },
+/** List data files available for a competition. */
+export async function competitionListFiles(competition: string, page?: number) {
+  const r = await kaggleFetch(`/competitions/data/list/${encodeURIComponent(competition)}`, {
+    query: { page: page ?? 1 },
   });
+  return r.data;
+}
 
-  if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get("location");
-    return {
-      available: !!location,
-      downloadUrl: location ? new URL(location, url).toString() : null,
-      status: response.status,
-      note: "The download URL may be temporary. Fetch it promptly and do not share it publicly.",
-    };
-  }
-
-  const contentType = response.headers.get("content-type") || "unknown";
-  if (!response.ok) {
-    const detail = await response.text();
-    return {
-      error: "Kaggle API error",
-      status: response.status,
-      detail: detail.slice(0, 2000),
-    };
-  }
-
-  if (contentType.includes("json")) {
-    return await response.json();
-  }
-
+/** Download info for a single competition file. Same credential caveat as dataset downloads. */
+export function competitionFileDownloadInfo(competition: string, fileName: string) {
+  const path = `/competitions/data/download/${encodeURIComponent(competition)}/${encodeURIComponent(fileName)}`;
   return {
-    available: true,
-    status: response.status,
-    contentType,
-    contentLength: response.headers.get("content-length"),
-    downloadUrl: response.url || url.toString(),
-    note: "Kaggle returned a file response. Use the URL immediately to download the output bundle.",
+    downloadPath: `${KAGGLE_API}${path}`,
+    competition,
+    fileName,
+    recommended:
+      "Use kaggle_download_competition_file_to_sandbox to fetch this file directly into a code sandbox without ever exposing your Kaggle credentials to it.",
   };
 }
 
-
-/** Check asynchronous dataset creation/version processing status. */
-export async function datasetStatus(owner: string, dataset: string) {
-  const r = await kaggleFetch(
-    `/datasets/status/${encodeURIComponent(owner)}/${encodeURIComponent(dataset)}`,
+/** Fetches a single competition file's bytes using the server's own Kaggle credentials. */
+export async function downloadCompetitionFile(competition: string, fileName: string) {
+  return kaggleFetchBinary(
+    `/competitions/data/download/${encodeURIComponent(competition)}/${encodeURIComponent(fileName)}`,
   );
-  return r.data;
 }
 
-/** List output files generated by a Kaggle kernel. */
-export async function listKernelFiles(
-  user: string,
-  kernel: string,
-  args: { pageSize?: number; pageToken?: string; version?: number } = {},
-) {
-  const r = await kaggleFetch("/kernels/files", {
-    query: {
-      userName: user,
-      kernelSlug: kernel,
-      pageSize: args.pageSize ?? 20,
-      pageToken: args.pageToken,
-      kernelVersionNumber: args.version,
-    },
+/** Lists your own submissions for a competition (requires the configured account to have joined it). */
+export async function competitionSubmissions(competition: string, page?: number) {
+  const r = await kaggleFetch(`/competitions/submissions/list/${encodeURIComponent(competition)}`, {
+    query: { page: page ?? 1 },
   });
-  return r.data;
-}
-
-/** Search Kaggle's public model catalogue. */
-export async function listModels(args: {
-  search?: string;
-  owner?: string;
-  sortBy?: string;
-  pageSize?: number;
-  pageToken?: string;
-} = {}) {
-  const r = await kaggleFetch("/models/list", {
-    query: {
-      search: args.search,
-      owner: args.owner,
-      sortBy: args.sortBy ?? "hotness",
-      pageSize: args.pageSize ?? 20,
-      pageToken: args.pageToken,
-    },
-  });
-  return r.data;
-}
-
-/** Retrieve metadata for a Kaggle model. */
-export async function getModel(owner: string, model: string) {
-  const r = await kaggleFetch(
-    `/models/${encodeURIComponent(owner)}/${encodeURIComponent(model)}/get`,
-  );
-  return r.data;
-}
-
-/** List files for one framework/variation of a Kaggle model. */
-export async function listModelInstanceFiles(
-  owner: string,
-  model: string,
-  framework: string,
-  instance: string,
-  args: { pageSize?: number; pageToken?: string } = {},
-) {
-  const r = await kaggleFetch(
-    `/models/${encodeURIComponent(owner)}/${encodeURIComponent(model)}/${encodeURIComponent(framework)}/${encodeURIComponent(instance)}/files`,
-    { query: { pageSize: args.pageSize ?? 20, pageToken: args.pageToken } },
-  );
   return r.data;
 }

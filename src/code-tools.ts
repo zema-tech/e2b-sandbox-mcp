@@ -5,6 +5,7 @@ export interface CodeSandboxInstance {
   sandbox: Sandbox;
   createdAt: Date;
   type: 'code';
+  timeoutMs: number;
 }
 
 export interface RunCodeResult {
@@ -30,6 +31,15 @@ export class CodeSandboxManager {
 
   constructor(e2bApiKey: string | null = null) {
     this.e2bApiKey = e2bApiKey;
+
+    // Unlike SandboxManager (desktop), this manager previously had NO cleanup sweep at
+    // all: a code sandbox's Map entry (and the E2B billing meter behind it) would live
+    // forever once created, even after E2B itself had already killed the underlying
+    // sandbox at its timeoutMs. This mirrors the same safety-net sweep used for desktop
+    // sandboxes.
+    setInterval(() => {
+      this.cleanupExpiredSandboxes();
+    }, 60000);
   }
 
   private ensureApiKey() {
@@ -58,6 +68,7 @@ export class CodeSandboxManager {
         sandbox,
         createdAt: new Date(),
         type: 'code',
+        timeoutMs: timeoutMs || this.DEFAULT_TIMEOUT,
       };
 
       this.activeSandboxes.set(sandbox.sandboxId, instance);
@@ -159,6 +170,40 @@ export class CodeSandboxManager {
     }
   }
 
+  /**
+   * Write raw binary content (e.g. a file fetched server-side from Kaggle) into the
+   * sandbox. Lets callers (see kaggle-tools.ts download helpers) pull a file into a
+   * sandbox without ever exposing credentials to the sandbox or the model.
+   */
+  async writeBinaryFile(
+    sandboxId: string,
+    path: string,
+    data: Buffer
+  ): Promise<FileResult & { bytes?: number }> {
+    const sandbox = this.getSandbox(sandboxId);
+    if (!sandbox) {
+      return {
+        success: false,
+        message: `Code sandbox ${sandboxId} not found`,
+      };
+    }
+
+    try {
+      await sandbox.files.write(path, data);
+      return {
+        success: true,
+        path,
+        bytes: data.length,
+        message: `Wrote ${data.length} bytes to ${path}`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   async readFile(sandboxId: string, path: string): Promise<FileResult> {
     const sandbox = this.getSandbox(sandboxId);
     if (!sandbox) {
@@ -236,5 +281,30 @@ export class CodeSandboxManager {
       type: i.type,
     }));
     return { active, count: active.length };
+  }
+
+  private async cleanupExpiredSandboxes(): Promise<void> {
+    const now = Date.now();
+    const GRACE_MS = 30000; // let E2B's own server-side timeout fire first
+
+    for (const [sandboxId, instance] of this.activeSandboxes.entries()) {
+      const uptime = now - instance.createdAt.getTime();
+      if (uptime > instance.timeoutMs + GRACE_MS) {
+        console.error(
+          `Cleaning up expired code sandbox: ${sandboxId} (uptime ${uptime}ms > timeout ${instance.timeoutMs}ms)`,
+        );
+        await this.cleanup(sandboxId);
+      }
+    }
+  }
+
+  // Graceful shutdown
+  async shutdown(): Promise<void> {
+    console.error("Shutting down code sandbox manager...");
+    const cleanupPromises = Array.from(this.activeSandboxes.keys()).map((sandboxId) =>
+      this.cleanup(sandboxId)
+    );
+    await Promise.allSettled(cleanupPromises);
+    console.error("All code sandboxes cleaned up");
   }
 }

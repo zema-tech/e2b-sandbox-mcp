@@ -1,6 +1,6 @@
 {
   "name": "e2b-sandbox-mcp",
-  "version": "1.2.0",
+  "version": "1.5.0",
   "description": "E2B sandboxes (desktop + code interpreter) via Model Context Protocol - supports weight-space programming and computer use",
   "main": "dist/server.js",
   "type": "module",
@@ -21,7 +21,8 @@
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "tsx": "^4.20.3"
   },
   "engines": {
     "node": ">=20"

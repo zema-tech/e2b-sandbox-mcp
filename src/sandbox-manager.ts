@@ -6,6 +6,8 @@ export interface SandboxInstance {
   streamUrl: string;
   createdAt: Date;
   resolution: [number, number];
+  /** The timeoutMs this sandbox was actually created/connected with (E2B enforces this server-side). */
+  timeoutMs: number;
 }
 
 export interface CreateSandboxResult {
@@ -65,6 +67,7 @@ export class SandboxManager {
         streamUrl,
         createdAt: new Date(),
         resolution: finalResolution,
+        timeoutMs: finalTimeout,
       };
 
       this.activeSandboxes.set(sandbox.sandboxId, instance);
@@ -115,6 +118,7 @@ export class SandboxManager {
         streamUrl: "", // Unknown for reconnected sandboxes
         createdAt: new Date(),
         resolution: this.DEFAULT_RESOLUTION, // Unknown for reconnected sandboxes
+        timeoutMs: this.DEFAULT_TIMEOUT, // Unknown original timeout; best-effort guess for local bookkeeping only
       };
 
       this.activeSandboxes.set(sandboxId, instance);
@@ -215,14 +219,24 @@ export class SandboxManager {
     };
   }
 
+  /**
+   * E2B already kills each sandbox server-side once its own `timeoutMs` elapses, so this
+   * sweep is only a local safety net to drop our bookkeeping Map entry for sandboxes that
+   * must already be dead. It MUST key off the timeout each sandbox was actually created
+   * with (previously this used a fixed 10-minute threshold for every sandbox, so a sandbox
+   * created with e.g. timeout: 1800000 (30 min) was force-killed locally after 10 minutes
+   * even though it should still have been alive).
+   */
   private async cleanupExpiredSandboxes(): Promise<void> {
-    const now = new Date();
-    const expiredThreshold = 10 * 60 * 1000; // 10 minutes
+    const now = Date.now();
+    const GRACE_MS = 30000; // let E2B's own server-side timeout fire first
 
     for (const [sandboxId, instance] of this.activeSandboxes.entries()) {
-      const uptime = now.getTime() - instance.createdAt.getTime();
-      if (uptime > expiredThreshold) {
-        console.error(`Cleaning up expired sandbox: ${sandboxId}`);
+      const uptime = now - instance.createdAt.getTime();
+      if (uptime > instance.timeoutMs + GRACE_MS) {
+        console.error(
+          `Cleaning up expired sandbox: ${sandboxId} (uptime ${uptime}ms > timeout ${instance.timeoutMs}ms)`,
+        );
         await this.cleanupSandbox(sandboxId);
       }
     }

@@ -7,20 +7,39 @@ import { z } from "zod";
 import { SandboxManager } from "./sandbox-manager.js";
 import { ComputerUseTools } from "./computer-use-tools.js";
 import { CodeSandboxManager } from "./code-tools.js";
-import { llmChat, listLlmProviders } from "./llm-tools.js";
+import { llmChat, llmListModels, llmEmbeddings, listLlmProviders } from "./llm-tools.js";
 import * as kaggle from "./kaggle-tools.js";
 
 const MCP_API_TOKEN = process.env.MCP_API_TOKEN;
 const E2B_API_KEY = process.env.E2B_API_KEY || null;
+const ALLOW_INSECURE = process.env.ALLOW_INSECURE === "true";
+
+// This server exposes arbitrary code execution (run_code) and calls out to external
+// services (Kaggle, LLM providers) using credentials configured here. Auth used to be
+// opt-in (only enforced if MCP_API_TOKEN happened to be set), so a deployment that
+// forgot to set it was silently wide open. It's now required by default; set
+// ALLOW_INSECURE=true explicitly if you really want to run without it (local dev only).
+if (!MCP_API_TOKEN && !ALLOW_INSECURE) {
+  console.error(
+    "FATAL: MCP_API_TOKEN is not set. Refusing to start without authentication, because " +
+      "this server exposes arbitrary code execution (run_code) and external API calls " +
+      "(Kaggle, LLM providers). Set MCP_API_TOKEN, or set ALLOW_INSECURE=true to explicitly " +
+      "run without auth (local development only).",
+  );
+  process.exit(1);
+}
+if (ALLOW_INSECURE && !MCP_API_TOKEN) {
+  console.warn("WARNING: ALLOW_INSECURE=true and no MCP_API_TOKEN set — the server is running without authentication.");
+}
 
 // Shared instances (stateless transport, but we keep sandbox state in memory)
-const sandboxManager = new SandboxManager(E2B_API_KEY);
+export const sandboxManager = new SandboxManager(E2B_API_KEY);
 const computerUseTools = new ComputerUseTools(sandboxManager);
-const codeSandboxManager = new CodeSandboxManager(E2B_API_KEY);
+export const codeSandboxManager = new CodeSandboxManager(E2B_API_KEY);
 
 export function createServer(): McpServer {
   const server = new McpServer(
-    { name: "e2b-sandbox-mcp", version: "1.4.0" },
+    { name: "e2b-sandbox-mcp", version: "1.5.0" },
     { capabilities: { logging: {} } },
   );
 
@@ -454,57 +473,157 @@ export function createServer(): McpServer {
     "kaggle_push_kernel",
     {
       description: "Push/update a Kaggle kernel (run on Kaggle). Pass full kernel push payload.",
-      inputSchema: { body: z.record(z.unknown()) },
+      inputSchema: { body: kernelPushSchema },
     },
     async ({ body }) => ({ content: [{ type: "text", text: JSON.stringify(await kaggle.pushKernel(body), null, 2) }] }),
   );
 
   server.registerTool(
-    "kaggle_list_competition_files",
+    "kaggle_dataset_file_download_info",
     {
-      description: "List downloadable data files for a Kaggle competition. The account may need to accept the competition rules first.",
-      inputSchema: { competition: z.string().min(1) },
+      description: "Get download info for a single file inside a Kaggle dataset (does not expose server credentials)",
+      inputSchema: { owner: z.string(), dataset: z.string(), fileName: z.string() },
     },
-    async ({ competition }) => ({
-      content: [{ type: "text", text: JSON.stringify(await kaggle.listCompetitionFiles(competition), null, 2) }],
+    async ({ owner, dataset, fileName }) => ({
+      content: [{ type: "text", text: JSON.stringify(kaggle.datasetFileDownloadInfo(owner, dataset, fileName), null, 2) }],
     }),
   );
 
   server.registerTool(
-    "kaggle_list_competition_submissions",
+    "kaggle_download_dataset_file_to_sandbox",
     {
-      description: "List the authenticated user's submissions for a Kaggle competition.",
+      description:
+        "Securely download a single file from a Kaggle dataset directly into a code sandbox, using this server's Kaggle credentials. The credentials never reach the sandbox or the model.",
       inputSchema: {
-        competition: z.string().min(1),
-        page: z.number().int().min(1).optional(),
+        sandboxId: z.string().describe("Target code sandbox ID (from create_code_sandbox)"),
+        owner: z.string(),
+        dataset: z.string(),
+        fileName: z.string().describe("File name, as returned by kaggle_list_dataset_files"),
+        destPath: z.string().optional().describe("Destination path in the sandbox (default: /home/user/<fileName>)"),
       },
     },
+    async ({ sandboxId, owner, dataset, fileName, destPath }) => {
+      const fetched = await kaggle.downloadDatasetFile(owner, dataset, fileName);
+      if (!fetched.ok) {
+        return { content: [{ type: "text", text: JSON.stringify(fetched.error, null, 2) }], isError: true };
+      }
+      const result = await codeSandboxManager.writeBinaryFile(
+        sandboxId,
+        destPath || `/home/user/${fileName}`,
+        fetched.buffer,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        isError: !result.success,
+      };
+    },
+  );
+
+  server.registerTool(
+    "kaggle_list_competition_files",
+    {
+      description: "List data files available for a Kaggle competition",
+      inputSchema: { competition: z.string(), page: z.number().optional() },
+    },
     async ({ competition, page }) => ({
-      content: [{ type: "text", text: JSON.stringify(await kaggle.listCompetitionSubmissions(competition, page ?? 1), null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(await kaggle.competitionListFiles(competition, page), null, 2) }],
     }),
   );
 
   server.registerTool(
-    "kaggle_view_competition_leaderboard",
+    "kaggle_competition_file_download_info",
     {
-      description: "View the leaderboard for a Kaggle competition.",
-      inputSchema: { competition: z.string().min(1) },
+      description: "Get download info for a single competition file (does not expose server credentials)",
+      inputSchema: { competition: z.string(), fileName: z.string() },
     },
-    async ({ competition }) => ({
-      content: [{ type: "text", text: JSON.stringify(await kaggle.viewCompetitionLeaderboard(competition), null, 2) }],
+    async ({ competition, fileName }) => ({
+      content: [{ type: "text", text: JSON.stringify(kaggle.competitionFileDownloadInfo(competition, fileName), null, 2) }],
     }),
   );
 
   server.registerTool(
-    "kaggle_get_kernel_output",
+    "kaggle_download_competition_file_to_sandbox",
     {
-      description: "Get the latest output bundle for a Kaggle notebook/kernel (user + kernel slug).",
-      inputSchema: { user: z.string().min(1), kernel: z.string().min(1) },
+      description:
+        "Securely download a single competition data file directly into a code sandbox, using this server's Kaggle credentials. The credentials never reach the sandbox or the model.",
+      inputSchema: {
+        sandboxId: z.string().describe("Target code sandbox ID (from create_code_sandbox)"),
+        competition: z.string(),
+        fileName: z.string().describe("File name, as returned by kaggle_list_competition_files"),
+        destPath: z.string().optional().describe("Destination path in the sandbox (default: /home/user/<fileName>)"),
+      },
     },
-    async ({ user, kernel }) => ({
-      content: [{ type: "text", text: JSON.stringify(await kaggle.getKernelOutput(user, kernel), null, 2) }],
+    async ({ sandboxId, competition, fileName, destPath }) => {
+      const fetched = await kaggle.downloadCompetitionFile(competition, fileName);
+      if (!fetched.ok) {
+        return { content: [{ type: "text", text: JSON.stringify(fetched.error, null, 2) }], isError: true };
+      }
+      const result = await codeSandboxManager.writeBinaryFile(
+        sandboxId,
+        destPath || `/home/user/${fileName}`,
+        fetched.buffer,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        isError: !result.success,
+      };
+    },
+  );
+
+  server.registerTool(
+    "kaggle_list_submissions",
+    {
+      description: "List your submissions for a Kaggle competition",
+      inputSchema: { competition: z.string(), page: z.number().optional() },
+    },
+    async ({ competition, page }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.competitionSubmissions(competition, page), null, 2) }],
     }),
   );
+
+  // ========== LLM TOOLS (cont'd) ==========
+
+  server.registerTool(
+    "llm_list_models",
+    {
+      description: "List models actually available from a provider's own /models endpoint (live, not the static hint list)",
+      inputSchema: {
+        provider: z.enum(["groq", "xai", "openai", "openrouter", "together", "deepseek", "fireworks", "mistral", "custom"]).optional(),
+        base_url: z.string().optional(),
+        api_key_env: z.string().optional(),
+      },
+    },
+    async (args) => {
+      const result = await llmListModels(args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        isError: !!(result as { error?: string }).error,
+      };
+    },
+  );
+
+  server.registerTool(
+    "llm_embeddings",
+    {
+      description:
+        "Get embeddings from an OpenAI-compatible provider's /embeddings endpoint. Not every provider here supports embeddings (e.g. groq, xai do not); unsupported providers return their own error.",
+      inputSchema: {
+        provider: z.enum(["groq", "xai", "openai", "openrouter", "together", "deepseek", "fireworks", "mistral", "custom"]).optional(),
+        model: z.string().describe("Embedding model name, e.g. text-embedding-3-small, mistral-embed"),
+        input: z.union([z.string(), z.array(z.string())]),
+        base_url: z.string().optional(),
+        api_key_env: z.string().optional(),
+      },
+    },
+    async (args) => {
+      const result = await llmEmbeddings(args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        isError: !!(result as { error?: string }).error,
+      };
+    },
+  );
+
 
   server.registerTool(
     "kaggle_dataset_status",
@@ -516,41 +635,34 @@ export function createServer(): McpServer {
       content: [{ type: "text", text: JSON.stringify(await kaggle.datasetStatus(owner, dataset), null, 2) }],
     }),
   );
-
   server.registerTool(
     "kaggle_list_kernel_files",
     {
       description: "List files generated by a Kaggle notebook run, with pagination and optional version number.",
       inputSchema: {
-        user: z.string().min(1),
-        kernel: z.string().min(1),
+        user: z.string().min(1), kernel: z.string().min(1),
         pageSize: z.number().int().min(1).max(200).optional(),
-        pageToken: z.string().optional(),
-        version: z.number().int().positive().optional(),
+        pageToken: z.string().optional(), version: z.number().int().positive().optional(),
       },
     },
     async ({ user, kernel, pageSize, pageToken, version }) => ({
       content: [{ type: "text", text: JSON.stringify(await kaggle.listKernelFiles(user, kernel, { pageSize, pageToken, version }), null, 2) }],
     }),
   );
-
   server.registerTool(
     "kaggle_list_models",
     {
       description: "Search Kaggle's model catalogue, optionally filtering by owner and sorting/paging results.",
       inputSchema: {
-        search: z.string().optional(),
-        owner: z.string().optional(),
+        search: z.string().optional(), owner: z.string().optional(),
         sortBy: z.enum(["hotness", "downloadCount", "voteCount", "notebookCount", "publishTime", "createTime", "updateTime"]).optional(),
-        pageSize: z.number().int().min(1).max(200).optional(),
-        pageToken: z.string().optional(),
+        pageSize: z.number().int().min(1).max(200).optional(), pageToken: z.string().optional(),
       },
     },
     async (args) => ({
       content: [{ type: "text", text: JSON.stringify(await kaggle.listModels(args), null, 2) }],
     }),
   );
-
   server.registerTool(
     "kaggle_get_model",
     {
@@ -561,27 +673,48 @@ export function createServer(): McpServer {
       content: [{ type: "text", text: JSON.stringify(await kaggle.getModel(owner, model), null, 2) }],
     }),
   );
-
   server.registerTool(
     "kaggle_list_model_instance_files",
     {
       description: "List files for a specific Kaggle model framework and variation, with pagination.",
       inputSchema: {
-        owner: z.string().min(1),
-        model: z.string().min(1),
-        framework: z.string().min(1),
-        instance: z.string().min(1),
-        pageSize: z.number().int().min(1).max(200).optional(),
-        pageToken: z.string().optional(),
+        owner: z.string().min(1), model: z.string().min(1),
+        framework: z.string().min(1), instance: z.string().min(1),
+        pageSize: z.number().int().min(1).max(200).optional(), pageToken: z.string().optional(),
       },
     },
     async ({ owner, model, framework, instance, pageSize, pageToken }) => ({
       content: [{ type: "text", text: JSON.stringify(await kaggle.listModelInstanceFiles(owner, model, framework, instance, { pageSize, pageToken }), null, 2) }],
     }),
   );
-
   return server;
 }
+
+/**
+ * Validates the shape of a Kaggle kernel-push payload before it's sent on, rather than
+ * passing an unchecked z.record(z.unknown()) straight through to the Kaggle API. Covers
+ * the documented kernel-push fields; .passthrough() still allows any extra fields Kaggle
+ * accepts that aren't enumerated here, so this narrows obvious mistakes (wrong types,
+ * missing required fields) without being able to silently reject a legitimate payload.
+ */
+const kernelPushSchema = z
+  .object({
+    id: z.string().optional(),
+    slug: z.string().optional(),
+    newTitle: z.string().optional(),
+    text: z.string().describe("The kernel source code"),
+    language: z.enum(["python", "r", "rmarkdown"]),
+    kernelType: z.enum(["script", "notebook"]),
+    isPrivate: z.boolean().optional(),
+    enableGpu: z.boolean().optional(),
+    enableTpu: z.boolean().optional(),
+    enableInternet: z.boolean().optional(),
+    datasetDataSources: z.array(z.string()).optional(),
+    competitionDataSources: z.array(z.string()).optional(),
+    kernelDataSources: z.array(z.string()).optional(),
+    categoryIds: z.array(z.string()).optional(),
+  })
+  .passthrough();
 
 const RENDER_EXTERNAL_HOSTNAME = process.env.RENDER_EXTERNAL_HOSTNAME;
 
@@ -590,9 +723,10 @@ export const app = createMcpExpressApp({
   allowedHosts: RENDER_EXTERNAL_HOSTNAME ? [RENDER_EXTERNAL_HOSTNAME] : undefined,
 });
 
-// Optional bearer token auth (set MCP_API_TOKEN on Render)
+// Bearer token auth (set MCP_API_TOKEN on Render; required unless ALLOW_INSECURE=true, see above)
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (req.path === "/health" || !MCP_API_TOKEN) {
+    // !MCP_API_TOKEN only reaches here when ALLOW_INSECURE=true was explicitly set above.
     next();
     return;
   }
@@ -618,16 +752,25 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     e2bConfigured: !!E2B_API_KEY,
-    version: "1.4.0",
+    version: "1.5.0",
     features: ["desktop", "code-interpreter", "llm-multi", "kaggle"],
     timestamp: new Date().toISOString(),
   });
 });
 
 app.post("/mcp", async (req: Request, res: Response) => {
-  // Kaggle and LLM tools do not require E2B. E2B-backed tools report their own
-  // configuration errors when invoked, so the MCP endpoint remains usable
-  // for deployments that only enable Kaggle.
+  if (!E2B_API_KEY) {
+    res.status(500).json({
+      jsonrpc: "2.0",
+      error: {
+        code: -32603,
+        message: "E2B_API_KEY is not configured on this server",
+      },
+      id: null,
+    });
+    return;
+  }
+
   const server = createServer();
   try {
     const transport = new StreamableHTTPServerTransport({

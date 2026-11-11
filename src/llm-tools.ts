@@ -25,52 +25,86 @@ export type LlmChatArgs = {
 
 type ProviderConfig = {
   envKey: string;
-  endpoint: string;
+  /** Base URL, WITHOUT a trailing slash and WITHOUT /chat/completions etc. appended. */
+  baseUrl: string;
   defaultModel: string;
 };
 
 const PROVIDERS: Record<Exclude<LlmProvider, "custom">, ProviderConfig> = {
   groq: {
     envKey: "GROQ_API_KEY",
-    endpoint: "https://api.groq.com/openai/v1/chat/completions",
+    baseUrl: "https://api.groq.com/openai/v1",
     defaultModel: "llama-3.3-70b-versatile",
   },
   xai: {
     envKey: "XAI_API_KEY",
-    endpoint: "https://api.x.ai/v1/chat/completions",
+    baseUrl: "https://api.x.ai/v1",
     defaultModel: "grok-2-latest",
   },
   openai: {
     envKey: "OPENAI_API_KEY",
-    endpoint: "https://api.openai.com/v1/chat/completions",
+    baseUrl: "https://api.openai.com/v1",
     defaultModel: "gpt-4o-mini",
   },
   openrouter: {
     envKey: "OPENROUTER_API_KEY",
-    endpoint: "https://openrouter.ai/api/v1/chat/completions",
+    baseUrl: "https://openrouter.ai/api/v1",
     defaultModel: "openai/gpt-4o-mini",
   },
   together: {
     envKey: "TOGETHER_API_KEY",
-    endpoint: "https://api.together.xyz/v1/chat/completions",
+    baseUrl: "https://api.together.xyz/v1",
     defaultModel: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
   },
   deepseek: {
     envKey: "DEEPSEEK_API_KEY",
-    endpoint: "https://api.deepseek.com/chat/completions",
+    baseUrl: "https://api.deepseek.com",
     defaultModel: "deepseek-chat",
   },
   fireworks: {
     envKey: "FIREWORKS_API_KEY",
-    endpoint: "https://api.fireworks.ai/inference/v1/chat/completions",
+    baseUrl: "https://api.fireworks.ai/inference/v1",
     defaultModel: "accounts/fireworks/models/llama-v3p1-70b-instruct",
   },
   mistral: {
     envKey: "MISTRAL_API_KEY",
-    endpoint: "https://api.mistral.ai/v1/chat/completions",
+    baseUrl: "https://api.mistral.ai/v1",
     defaultModel: "mistral-small-latest",
   },
 };
+
+/** Resolves {apiKey, baseUrl} for a provider, or a human-readable error. Shared by
+ *  chat/models/embeddings so the three tools can't drift on how a provider is resolved. */
+function resolveProvider(args: {
+  provider?: LlmProvider;
+  base_url?: string;
+  api_key_env?: string;
+}): { ok: true; resolved: LlmProvider; apiKey: string; baseUrl: string } | { ok: false; error: string } {
+  const resolved = args.provider || pickDefaultProvider();
+
+  let apiKey: string | undefined;
+  let baseUrl: string;
+
+  if (resolved === "custom") {
+    if (!args.base_url) {
+      return { ok: false, error: "provider=custom requires base_url" };
+    }
+    apiKey = process.env[args.api_key_env || "OPENAI_API_KEY"];
+    baseUrl = args.base_url.replace(/\/$/, "");
+  } else {
+    const cfg = PROVIDERS[resolved];
+    apiKey = process.env[cfg.envKey];
+    baseUrl = cfg.baseUrl;
+  }
+
+  if (!apiKey) {
+    const envName =
+      resolved === "custom" ? args.api_key_env || "OPENAI_API_KEY" : PROVIDERS[resolved].envKey;
+    return { ok: false, error: `Missing API key for provider '${resolved}'. Set ${envName} on Render.` };
+  }
+
+  return { ok: true, resolved, apiKey, baseUrl };
+}
 
 function pickDefaultProvider(): LlmProvider {
   const order: Exclude<LlmProvider, "custom">[] = [
@@ -90,46 +124,15 @@ function pickDefaultProvider(): LlmProvider {
 }
 
 export async function llmChat(args: LlmChatArgs) {
-  const {
-    provider,
-    model,
-    messages,
-    temperature,
-    max_tokens,
-    base_url,
-    api_key_env,
-  } = args;
+  const { provider, model, messages, temperature, max_tokens, base_url, api_key_env } = args;
 
-  const resolved = provider || pickDefaultProvider();
-
-  let apiKey: string | undefined;
-  let endpoint: string;
-  let defaultModel: string;
-
-  if (resolved === "custom") {
-    apiKey = process.env[api_key_env || "OPENAI_API_KEY"];
-    endpoint = `${(base_url || "").replace(/\/$/, "")}/chat/completions`;
-    defaultModel = model || "gpt-4o-mini";
-    if (!base_url) {
-      return { error: "provider=custom requires base_url" };
-    }
-  } else {
-    const cfg = PROVIDERS[resolved];
-    apiKey = process.env[cfg.envKey];
-    endpoint = cfg.endpoint;
-    defaultModel = cfg.defaultModel;
+  const resolution = resolveProvider({ provider, base_url, api_key_env });
+  if (!resolution.ok) {
+    return { error: resolution.error, configured: listLlmProviders() };
   }
-
-  if (!apiKey) {
-    const envName =
-      resolved === "custom"
-        ? api_key_env || "OPENAI_API_KEY"
-        : PROVIDERS[resolved as Exclude<LlmProvider, "custom">].envKey;
-    return {
-      error: `Missing API key for provider '${resolved}'. Set ${envName} on Render.`,
-      configured: listLlmProviders(),
-    };
-  }
+  const { resolved, apiKey, baseUrl } = resolution;
+  const defaultModel =
+    resolved === "custom" ? model || "gpt-4o-mini" : PROVIDERS[resolved].defaultModel;
 
   const body = {
     model: model || defaultModel,
@@ -147,7 +150,7 @@ export async function llmChat(args: LlmChatArgs) {
     headers["X-Title"] = process.env.OPENROUTER_TITLE || "e2b-sandbox-mcp";
   }
 
-  const res = await fetch(endpoint, {
+  const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
@@ -167,6 +170,83 @@ export async function llmChat(args: LlmChatArgs) {
     content,
     usage: data.usage ?? null,
     raw: content ? undefined : data,
+  };
+}
+
+export type LlmListModelsArgs = {
+  provider?: LlmProvider;
+  base_url?: string;
+  api_key_env?: string;
+};
+
+/** Lists models actually available from the provider's own /models endpoint (OpenAI-compatible
+ *  convention followed by all providers here), instead of relying on the static models_hint. */
+export async function llmListModels(args: LlmListModelsArgs) {
+  const resolution = resolveProvider(args);
+  if (!resolution.ok) {
+    return { error: resolution.error, configured: listLlmProviders() };
+  }
+  const { resolved, apiKey, baseUrl } = resolution;
+
+  try {
+    const res = await fetch(`${baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    const data = (await res.json().catch(() => null)) as any;
+    if (!res.ok) {
+      return { error: "Failed to list models", status: res.status, data };
+    }
+    const models = Array.isArray(data?.data)
+      ? data.data.map((m: any) => m.id).filter(Boolean)
+      : data;
+    return { provider: resolved, models };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export type LlmEmbeddingsArgs = {
+  provider?: LlmProvider;
+  model?: string;
+  input: string | string[];
+  base_url?: string;
+  api_key_env?: string;
+};
+
+/** Calls the provider's /embeddings endpoint (OpenAI-compatible). Not every provider here
+ *  offers embeddings (e.g. groq, xai do not as of this writing) — on those the provider's
+ *  own error response is returned as-is rather than guessed/blocked client-side. */
+export async function llmEmbeddings(args: LlmEmbeddingsArgs) {
+  const { provider, model, input, base_url, api_key_env } = args;
+  const resolution = resolveProvider({ provider, base_url, api_key_env });
+  if (!resolution.ok) {
+    return { error: resolution.error, configured: listLlmProviders() };
+  }
+  const { resolved, apiKey, baseUrl } = resolution;
+
+  if (!model) {
+    return { error: "model is required for embeddings (providers do not have a safe universal default)" };
+  }
+
+  const res = await fetch(`${baseUrl}/embeddings`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model, input }),
+  });
+
+  const data = (await res.json().catch(() => null)) as any;
+  if (!res.ok) {
+    return { error: "Embeddings request failed", status: res.status, data };
+  }
+
+  return {
+    provider: resolved,
+    model,
+    embeddings: Array.isArray(data?.data) ? data.data.map((d: any) => d.embedding) : null,
+    usage: data?.usage ?? null,
   };
 }
 
