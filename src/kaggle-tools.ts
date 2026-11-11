@@ -240,10 +240,54 @@ export async function viewCompetitionLeaderboard(competition: string) {
   return r.data;
 }
 
-/** Retrieve the latest notebook output bundle metadata/response. */
+/**
+ * Resolve the latest notebook output download. Kaggle may respond with a
+ * redirect to a temporary signed URL, so do not parse the ZIP as text.
+ */
 export async function getKernelOutput(user: string, kernel: string) {
-  const r = await kaggleFetch("/kernels/output", {
-    query: { userName: user, kernelSlug: kernel },
+  const auth = authHeader();
+  if (!auth) return missingCreds();
+
+  const url = new URL(`${KAGGLE_API}/kernels/output`);
+  url.searchParams.set("userName", user);
+  url.searchParams.set("kernelSlug", kernel);
+
+  const response = await fetch(url, {
+    method: "GET",
+    redirect: "manual",
+    headers: { Authorization: auth, Accept: "application/json, */*" },
   });
-  return r.data;
+
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location");
+    return {
+      available: !!location,
+      downloadUrl: location ? new URL(location, url).toString() : null,
+      status: response.status,
+      note: "The download URL may be temporary. Fetch it promptly and do not share it publicly.",
+    };
+  }
+
+  const contentType = response.headers.get("content-type") || "unknown";
+  if (!response.ok) {
+    const detail = await response.text();
+    return {
+      error: "Kaggle API error",
+      status: response.status,
+      detail: detail.slice(0, 2000),
+    };
+  }
+
+  if (contentType.includes("json")) {
+    return await response.json();
+  }
+
+  return {
+    available: true,
+    status: response.status,
+    contentType,
+    contentLength: response.headers.get("content-length"),
+    downloadUrl: response.url || url.toString(),
+    note: "Kaggle returned a file response. Use the URL immediately to download the output bundle.",
+  };
 }
