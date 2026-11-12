@@ -583,3 +583,37 @@ export async function resolveKernelOutputSignedUrl(user: string, kernel: string,
   }
   return { fileName: match.fileName || match.name || fileName, url: match.url as string };
 }
+
+/** Verify a dataset by view + file list (works for private; list-by-user often hides private). */
+export async function verifyDataset(owner: string, dataset: string, expectedFiles?: string[]) {
+  const meta = await getDataset(owner, dataset);
+  if ((meta as any)?.error) return { ok: false, stage: "get", meta };
+  const filesResp = await listDatasetFiles(owner, dataset);
+  if ((filesResp as any)?.error) return { ok: false, stage: "files", meta, filesResp };
+  const files: any[] =
+    (filesResp as any)?.datasetFiles ||
+    (Array.isArray(filesResp) ? filesResp : []);
+  const names = files.map((f) => f.name || f.nameNullable).filter(Boolean);
+  const sizes: Record<string, number> = {};
+  for (const f of files) {
+    const n = f.name || f.nameNullable;
+    if (n) sizes[n] = f.totalBytes ?? f.totalBytesNullable ?? 0;
+  }
+  let missing: string[] = [];
+  if (expectedFiles?.length) {
+    missing = expectedFiles.filter((e) => !names.includes(e) && !names.some((n) => n.endsWith("/" + e)));
+  }
+  return {
+    ok: missing.length === 0,
+    ref: `${owner}/${dataset}`,
+    title: (meta as any)?.title || (meta as any)?.titleNullable,
+    isPrivate: (meta as any)?.isPrivate,
+    totalBytes: (meta as any)?.totalBytes || (meta as any)?.totalBytesNullable,
+    currentVersionNumber: (meta as any)?.currentVersionNumber || (meta as any)?.currentVersionNumberNullable,
+    fileCount: names.length,
+    files: names.map((n) => ({ name: n, bytes: sizes[n] ?? null })),
+    missingExpected: missing,
+    note:
+      "Private datasets often do NOT appear in kaggle_list_datasets(user=...). Use kaggle_get_dataset / kaggle_dataset_verify instead.",
+  };
+}
