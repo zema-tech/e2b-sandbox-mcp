@@ -466,3 +466,120 @@ export async function datasetCreateNew(body: Record<string, unknown>) {
   const r = await kaggleFetch("/datasets/create/new", { method: "POST", body });
   return r.data;
 }
+
+export async function startDatasetFileUpload(args: {
+  fileName: string;
+  contentLength: number;
+  lastModifiedEpochSeconds?: number;
+}) {
+  const lastMod = args.lastModifiedEpochSeconds ?? Math.floor(Date.now() / 1000);
+  const path = `/datasets/upload/file/${args.contentLength}/${lastMod}`;
+  const auth = authHeader();
+  if (!auth) return missingCreds();
+  const url = new URL(`${KAGGLE_API}${path}`);
+  const form = new FormData();
+  form.append("fileName", args.fileName);
+  const res = await fetch(url.toString(), {
+    method: "POST",
+    headers: { Authorization: auth, Accept: "application/json" },
+    body: form,
+  });
+  const text = await res.text();
+  let data: any = text;
+  try { data = text ? JSON.parse(text) : null; } catch {}
+  if (!res.ok) return { error: "Kaggle API error", status: res.status, data };
+  return data;
+}
+
+export async function putDatasetFileToCreateUrl(
+  createUrl: string,
+  body: Buffer | Uint8Array,
+  contentType = "application/octet-stream",
+) {
+  const res = await fetch(createUrl, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body: body as any,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return { ok: false as const, status: res.status, data: text };
+  }
+  return { ok: true as const, status: res.status };
+}
+
+export async function uploadFromUrlToDatasetFile(args: {
+  sourceUrl: string;
+  fileName: string;
+  contentLength?: number;
+}) {
+  let contentLength = args.contentLength;
+  if (contentLength == null) {
+    const head = await fetch(args.sourceUrl, { method: "HEAD" });
+    const cl = head.headers.get("content-length");
+    if (cl) contentLength = Number(cl);
+  }
+  if (contentLength == null || !Number.isFinite(contentLength)) {
+    return { error: "contentLength required (or source must expose Content-Length)." };
+  }
+  const start = await startDatasetFileUpload({ fileName: args.fileName, contentLength });
+  if ((start as any)?.error) return start;
+  const createUrl = (start as any).createUrl || (start as any).createURL;
+  const token = (start as any).token;
+  if (!createUrl || !token) return { error: "startDatasetFileUpload missing createUrl/token", start };
+  const src = await fetch(args.sourceUrl);
+  if (!src.ok || !src.body) return { error: "Source URL fetch failed", status: src.status };
+  const put = await fetch(createUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(contentLength),
+    },
+    body: src.body as any,
+    duplex: "half",
+  } as any);
+  if (!put.ok) {
+    const text = await put.text().catch(() => "");
+    return { error: "PUT to createUrl failed", status: put.status, data: text, token };
+  }
+  return { ok: true, token, fileName: args.fileName, contentLength };
+}
+
+export async function uploadTextAsDatasetFile(args: { fileName: string; text: string }) {
+  const buf = Buffer.from(args.text, "utf8");
+  const start = await startDatasetFileUpload({ fileName: args.fileName, contentLength: buf.length });
+  if ((start as any)?.error) return start;
+  const createUrl = (start as any).createUrl || (start as any).createURL;
+  const token = (start as any).token;
+  if (!createUrl || !token) return { error: "missing createUrl/token", start };
+  const put = await putDatasetFileToCreateUrl(createUrl, buf, "text/plain; charset=utf-8");
+  if (!put.ok) return { error: "PUT failed", put, token };
+  return { ok: true, token, fileName: args.fileName, bytes: buf.length };
+}
+
+export async function datasetCreateVersion(owner: string, dataset: string, body: Record<string, unknown>) {
+  const r = await kaggleFetch(
+    `/datasets/create/version/${encodeURIComponent(owner)}/${encodeURIComponent(dataset)}`,
+    { method: "POST", body },
+  );
+  return r.data;
+}
+
+export async function resolveKernelOutputSignedUrl(user: string, kernel: string, fileName: string) {
+  const listed = await kernelOutput(user, kernel);
+  if ((listed as any)?.error) return listed;
+  const files: any[] = (listed as any)?.files || [];
+  const want = fileName.replace(/^\.\//, "");
+  const match =
+    files.find((f) => (f.fileName || f.name || "") === want) ||
+    files.find((f) => (f.fileName || f.name || "").endsWith("/" + want)) ||
+    files.find((f) => (f.fileName || f.name || "").split("/").pop() === want);
+  if (!match?.url) {
+    return {
+      error: "File not found in kernel output",
+      fileName,
+      available: files.map((f) => f.fileName || f.name).filter(Boolean),
+    };
+  }
+  return { fileName: match.fileName || match.name || fileName, url: match.url as string };
+}
