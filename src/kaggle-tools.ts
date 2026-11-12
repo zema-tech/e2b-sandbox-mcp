@@ -407,10 +407,46 @@ export function kernelOutputFileDownloadInfo(user: string, kernel: string, fileN
 }
 
 export async function downloadKernelOutputFile(user: string, kernel: string, fileName: string) {
+  // Prefer signed URLs from /kernels/output (REST download paths often 404).
+  const listed = await kernelOutput(user, kernel);
+  const files: any[] = (listed as any)?.files || [];
+  const norm = (s: string) => s.replace(/^\.\//, "").replace(/\/g, "/");
+  const want = norm(fileName);
+  const match =
+    files.find((f) => norm(f.fileName || f.name || "") === want) ||
+    files.find((f) => norm(f.fileName || f.name || "").endsWith("/" + want)) ||
+    files.find((f) => (f.fileName || f.name || "").split("/").pop() === want);
+
+  if (match?.url) {
+    const res = await fetch(match.url);
+    if (!res.ok) {
+      return {
+        ok: false as const,
+        error: {
+          error: "Signed URL download failed",
+          status: res.status,
+          fileName: match.fileName || match.name,
+        },
+      };
+    }
+    const arrayBuffer = await res.arrayBuffer();
+    return {
+      ok: true as const,
+      buffer: Buffer.from(arrayBuffer),
+      contentType: res.headers.get("content-type"),
+      resolvedName: match.fileName || match.name || fileName,
+    };
+  }
+
+  // Fallback REST shapes
   const attempts = [
     `/kernels/output/download/${encodeURIComponent(user)}/${encodeURIComponent(kernel)}/${encodeURIComponent(fileName)}`,
   ];
-  let lastErr: unknown = null;
+  let lastErr: unknown = {
+    error: "Kernel output file not found in /kernels/output listing",
+    fileName,
+    available: files.map((f) => f.fileName || f.name).filter(Boolean),
+  };
   for (const path of attempts) {
     const r = await kaggleFetchBinary(path);
     if (r.ok) return r;
