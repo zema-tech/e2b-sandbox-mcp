@@ -39,7 +39,7 @@ export const codeSandboxManager = new CodeSandboxManager(E2B_API_KEY);
 
 export function createServer(): McpServer {
   const server = new McpServer(
-    { name: "e2b-sandbox-mcp", version: "1.5.0" },
+    { name: "e2b-sandbox-mcp", version: "1.5.1" },
     { capabilities: { logging: {} } },
   );
 
@@ -687,6 +687,82 @@ export function createServer(): McpServer {
       content: [{ type: "text", text: JSON.stringify(await kaggle.listModelInstanceFiles(owner, model, framework, instance, { pageSize, pageToken }), null, 2) }],
     }),
   );
+
+  server.registerTool(
+    "kaggle_kernel_output",
+    {
+      description:
+        "Get kernel session OUTPUT (run artifacts + log). Use this to recover phase reports, checksums, DONE lines — not just source. Prefer over pull_kernel for FASE A recovery.",
+      inputSchema: {
+        user: z.string().min(1),
+        kernel: z.string().min(1),
+        pageToken: z.string().optional(),
+      },
+    },
+    async ({ user, kernel, pageToken }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.kernelOutput(user, kernel, { pageToken }), null, 2) }],
+    }),
+  );
+
+  server.registerTool(
+    "kaggle_kernel_output_file_download_info",
+    {
+      description: "Download path info for one kernel output file (credentials stay on server)",
+      inputSchema: {
+        user: z.string().min(1),
+        kernel: z.string().min(1),
+        fileName: z.string().min(1),
+      },
+    },
+    async ({ user, kernel, fileName }) => ({
+      content: [{ type: "text", text: JSON.stringify(kaggle.kernelOutputFileDownloadInfo(user, kernel, fileName), null, 2) }],
+    }),
+  );
+
+  server.registerTool(
+    "kaggle_download_kernel_output_file_to_sandbox",
+    {
+      description:
+        "Download one kernel OUTPUT file (e.g. phase1_2_report.json, checksums.txt) into an E2B code sandbox using server Kaggle credentials. Critical for FASE A/B verification.",
+      inputSchema: {
+        sandboxId: z.string().describe("Code sandbox id from create_code_sandbox"),
+        user: z.string().min(1),
+        kernel: z.string().min(1),
+        fileName: z.string().min(1).describe("Exact name from kaggle_list_kernel_files / kaggle_kernel_output"),
+        destPath: z.string().optional(),
+      },
+    },
+    async ({ sandboxId, user, kernel, fileName, destPath }) => {
+      const fetched = await kaggle.downloadKernelOutputFile(user, kernel, fileName);
+      if (!fetched.ok) {
+        return { content: [{ type: "text", text: JSON.stringify(fetched.error, null, 2) }], isError: true };
+      }
+      const result = await codeSandboxManager.writeBinaryFile(
+        sandboxId,
+        destPath || `/home/user/${fileName}`,
+        fetched.buffer,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify({ ...result, bytes: fetched.buffer.length, contentType: fetched.contentType }, null, 2) }],
+        isError: !result.success,
+      };
+    },
+  );
+
+  server.registerTool(
+    "kaggle_dataset_create_new",
+    {
+      description:
+        "Best-effort create a new Kaggle dataset via API (metadata-oriented). Large weight files usually need Save Output as Dataset in UI or a publishing kernel after hash verification.",
+      inputSchema: {
+        body: z.record(z.unknown()).describe("Dataset create payload / metadata fields accepted by Kaggle API"),
+      },
+    },
+    async ({ body }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.datasetCreateNew(body), null, 2) }],
+    }),
+  );
+
   return server;
 }
 
@@ -752,7 +828,7 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     e2bConfigured: !!E2B_API_KEY,
-    version: "1.5.0",
+    version: "1.5.1",
     features: ["desktop", "code-interpreter", "llm-multi", "kaggle"],
     timestamp: new Date().toISOString(),
   });
