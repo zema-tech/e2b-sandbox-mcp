@@ -39,7 +39,7 @@ export const codeSandboxManager = new CodeSandboxManager(E2B_API_KEY);
 
 export function createServer(): McpServer {
   const server = new McpServer(
-    { name: "e2b-sandbox-mcp", version: "1.6.0" },
+    { name: "e2b-sandbox-mcp", version: "1.6.1" },
     { capabilities: { logging: {} } },
   );
 
@@ -842,6 +842,23 @@ export function createServer(): McpServer {
     }),
   );
 
+
+  server.registerTool(
+    "kaggle_dataset_verify",
+    {
+      description:
+        "Verify a dataset (including PRIVATE) via view + file list. Prefer this over kaggle_list_datasets(user=...) which often returns [] for private datasets and is not a permission error.",
+      inputSchema: {
+        owner: z.string().min(1),
+        dataset: z.string().min(1),
+        expectedFiles: z.array(z.string()).optional().describe("Optional file names that must be present"),
+      },
+    },
+    async ({ owner, dataset, expectedFiles }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.verifyDataset(owner, dataset, expectedFiles), null, 2) }],
+    }),
+  );
+
   return server;
 }
 
@@ -907,7 +924,7 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     e2bConfigured: !!E2B_API_KEY,
-    version: "1.6.0",
+    version: "1.6.1",
     features: ["desktop", "code-interpreter", "llm-multi", "kaggle"],
     timestamp: new Date().toISOString(),
   });
