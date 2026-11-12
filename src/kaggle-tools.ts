@@ -226,17 +226,26 @@ export async function listKernels(args: {
 }
 
 export async function pullKernel(user: string, kernel: string, metadata = true) {
-  const r = await kaggleFetch(
+  let r = await kaggleFetch(
     `/kernels/pull/${encodeURIComponent(user)}/${encodeURIComponent(kernel)}`,
-    { query: { metadata: metadata ? "true" : "false" } },
   );
+  if (!r.ok) {
+    r = await kaggleFetch("/kernels/pull", {
+      query: { userName: user, kernelSlug: kernel },
+    });
+  }
   return r.data;
 }
 
 export async function kernelStatus(user: string, kernel: string) {
-  const r = await kaggleFetch(
-    `/kernels/status/${encodeURIComponent(user)}/${encodeURIComponent(kernel)}`,
-  );
+  let r = await kaggleFetch("/kernels/status", {
+    query: { userName: user, kernelSlug: kernel },
+  });
+  if (!r.ok) {
+    r = await kaggleFetch(
+      `/kernels/status/${encodeURIComponent(user)}/${encodeURIComponent(kernel)}`,
+    );
+  }
   return r.data;
 }
 
@@ -368,5 +377,56 @@ export async function listModelInstanceFiles(
     `/models/${encodeURIComponent(owner)}/${encodeURIComponent(model)}/${encodeURIComponent(framework)}/${encodeURIComponent(instance)}/files`,
     { query: { pageSize: args.pageSize ?? 20, pageToken: args.pageToken } },
   );
+  return r.data;
+}
+
+
+export async function kernelOutput(
+  user: string,
+  kernel: string,
+  args: { pageToken?: string } = {},
+) {
+  const r = await kaggleFetch("/kernels/output", {
+    query: {
+      userName: user,
+      kernelSlug: kernel,
+      pageToken: args.pageToken,
+    },
+  });
+  return r.data;
+}
+
+export function kernelOutputFileDownloadInfo(user: string, kernel: string, fileName: string) {
+  return {
+    user,
+    kernel,
+    fileName,
+    recommended:
+      "Use kaggle_download_kernel_output_file_to_sandbox so credentials never leave this server.",
+  };
+}
+
+export async function downloadKernelOutputFile(user: string, kernel: string, fileName: string) {
+  const attempts = [
+    `/kernels/output/download/${encodeURIComponent(user)}/${encodeURIComponent(kernel)}/${encodeURIComponent(fileName)}`,
+  ];
+  let lastErr: unknown = null;
+  for (const path of attempts) {
+    const r = await kaggleFetchBinary(path);
+    if (r.ok) return r;
+    lastErr = r.error;
+  }
+  const r2 = await kaggleFetchBinary("/kernels/output/download", {
+    userName: user,
+    kernelSlug: kernel,
+    filePath: fileName,
+    fileName,
+  });
+  if (r2.ok) return r2;
+  return { ok: false as const, error: lastErr || r2.error };
+}
+
+export async function datasetCreateNew(body: Record<string, unknown>) {
+  const r = await kaggleFetch("/datasets/create/new", { method: "POST", body });
   return r.data;
 }
