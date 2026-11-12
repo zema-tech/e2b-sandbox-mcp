@@ -39,7 +39,7 @@ export const codeSandboxManager = new CodeSandboxManager(E2B_API_KEY);
 
 export function createServer(): McpServer {
   const server = new McpServer(
-    { name: "e2b-sandbox-mcp", version: "1.5.1" },
+    { name: "e2b-sandbox-mcp", version: "1.6.0" },
     { capabilities: { logging: {} } },
   );
 
@@ -763,6 +763,85 @@ export function createServer(): McpServer {
     }),
   );
 
+
+  server.registerTool(
+    "kaggle_dataset_start_file_upload",
+    {
+      description:
+        "Start a Kaggle dataset file upload. Returns { token, createUrl }. PUT file bytes to createUrl, then pass token to kaggle_dataset_create_new / version.",
+      inputSchema: {
+        fileName: z.string().min(1),
+        contentLength: z.number().int().positive(),
+        lastModifiedEpochSeconds: z.number().int().optional(),
+      },
+    },
+    async (args) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.startDatasetFileUpload(args), null, 2) }],
+    }),
+  );
+
+  server.registerTool(
+    "kaggle_resolve_kernel_output_url",
+    {
+      description:
+        "Resolve a kernel output file to a temporary signed download URL (for E2B curl or streaming upload). Does not download through Render RAM.",
+      inputSchema: {
+        user: z.string().min(1),
+        kernel: z.string().min(1),
+        fileName: z.string().min(1),
+      },
+    },
+    async ({ user, kernel, fileName }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.resolveKernelOutputSignedUrl(user, kernel, fileName), null, 2) }],
+    }),
+  );
+
+  server.registerTool(
+    "kaggle_upload_text_as_dataset_file",
+    {
+      description:
+        "Upload a SMALL text payload (checksums/report) as a Kaggle dataset blob and return token. Not for multi-GB files.",
+      inputSchema: {
+        fileName: z.string().min(1),
+        text: z.string(),
+      },
+    },
+    async (args) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.uploadTextAsDatasetFile(args), null, 2) }],
+    }),
+  );
+
+  server.registerTool(
+    "kaggle_upload_from_url_as_dataset_file",
+    {
+      description:
+        "Stream a remote file URL into a Kaggle dataset blob (start upload + PUT stream). Prefer this for large files instead of buffering on the MCP host. Pass contentLength when known.",
+      inputSchema: {
+        sourceUrl: z.string().url(),
+        fileName: z.string().min(1),
+        contentLength: z.number().int().positive().optional(),
+      },
+    },
+    async (args) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.uploadFromUrlToDatasetFile(args), null, 2) }],
+    }),
+  );
+
+  server.registerTool(
+    "kaggle_dataset_create_version",
+    {
+      description: "Create a new version of an existing dataset (owner/slug) after uploading file tokens.",
+      inputSchema: {
+        owner: z.string().min(1),
+        dataset: z.string().min(1),
+        body: z.record(z.unknown()),
+      },
+    },
+    async ({ owner, dataset, body }) => ({
+      content: [{ type: "text", text: JSON.stringify(await kaggle.datasetCreateVersion(owner, dataset, body), null, 2) }],
+    }),
+  );
+
   return server;
 }
 
@@ -828,7 +907,7 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     e2bConfigured: !!E2B_API_KEY,
-    version: "1.5.1",
+    version: "1.6.0",
     features: ["desktop", "code-interpreter", "llm-multi", "kaggle"],
     timestamp: new Date().toISOString(),
   });
