@@ -410,7 +410,7 @@ export async function downloadKernelOutputFile(user: string, kernel: string, fil
   // Prefer signed URLs from /kernels/output (REST download paths often 404).
   const listed = await kernelOutput(user, kernel);
   const files: any[] = (listed as any)?.files || [];
-  const norm = (s: string) => s.replace(/^\.\//, "").replace(/\/g, "/");
+  const norm = (s: string) => s.replace(/^\.\//, "").replace(/\\/g, "/");
   const want = norm(fileName);
   const match =
     files.find((f) => norm(f.fileName || f.name || "") === want) ||
